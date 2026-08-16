@@ -36,6 +36,14 @@ jobs:
   judge:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # REQUIRED — the secrets live on this environment, not on the repository. A job that
+    # doesn't declare it silently receives empty strings for every `secrets.*`, which
+    # looks exactly like "the secret isn't set". Preferred over repository secrets here
+    # because an environment can be restricted to the default branch, which matters on a
+    # public repo.
+    environment: pda-judge-env
+
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +63,12 @@ jobs:
               echo "$name: set (length ${#val})"
             fi
           done
-          [ "$missing" -eq 0 ] || { echo "::error::Add them under Settings → Secrets and variables → Actions."; exit 1; }
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Secrets are missing from this job."
+            echo "::error::If they exist as ENVIRONMENT secrets, the job must declare the matching \`environment:\` — otherwise every secrets.* is an empty string and looks unset. This job declares 'pda-judge-env'."
+            echo "::error::If they exist as REPOSITORY secrets, no environment is needed."
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
