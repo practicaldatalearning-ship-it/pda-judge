@@ -1,0 +1,3 @@
+# Deliberately empty: the judge uses only the standard library.
+# Every dependency here is a dependency the SANDBOX may not need, and a slim image is
+# what keeps container startup — the dominant cost per batch — near zero.

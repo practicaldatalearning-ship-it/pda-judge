@@ -1,0 +1,87 @@
+name: judge
+
+# Practice submissions are graded HERE, never on the student's machine, so hidden tests
+# never leave the server and a verdict cannot be forged.
+#
+# Triggers, in order of importance:
+#   repository_dispatch — fired the moment a student submits (the ~30 s path)
+#   schedule            — the SAFETY NET only. GitHub scheduled runs are best-effort and
+#                         can lag 10+ min, which is useless as a primary path but exactly
+#                         right for catching a dropped dispatch or a dead runner.
+#   workflow_dispatch   — manual drain
+#
+# The queue in Postgres is the source of truth; this workflow is disposable.
+on:
+  repository_dispatch:
+    types: [judge-batch]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "Max submissions to judge this run"
+        required: false
+        default: "20"
+
+# Never interrupt a batch: a cancelled run leaves rows in `judging` until the stale
+# reclaim frees them, which delays those students for no reason.
+concurrency:
+  group: judge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail loudly and specifically. Prints set/missing and length ONLY — never a value.
+      - name: Preflight — required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=0
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY; do
+            val="${!name}"
+            if [ -z "$val" ]; then
+              echo "::error::Required secret '$name' is NOT set."
+              missing=1
+            else
+              echo "$name: set (length ${#val})"
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "::error::Add them under Settings → Secrets and variables → Actions."; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Unit tests (comparison semantics)
+        # These guard the one thing that silently corrupts every verdict: if `compare`
+        # drifts from the generator's rules, students get Accepted on wrong answers.
+        run: python -m unittest discover -s tests -v
+
+      - name: Build sandbox
+        run: |
+          cp judge/harness.py judge/compare.py sandbox/
+          docker build -t pda-judge-sandbox sandbox/
+
+      - name: Sandbox self-check (no network, hostile code contained)
+        run: |
+          # Proves the boundary before we trust it with a submission.
+          docker run --rm --network none pda-judge-sandbox python -c "print('sandbox ok')"
+          ! docker run --rm --network none pda-judge-sandbox \
+            python -c "import urllib.request;urllib.request.urlopen('https://example.com',timeout=5)" 2>/dev/null \
+            && echo "network correctly blocked"
+
+      - name: Judge a batch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          JUDGE_BATCH: ${{ github.event.inputs.batch || github.event.client_payload.batch || '20' }}
+          JUDGE_IMAGE: pda-judge-sandbox
+        run: python -m judge.main
