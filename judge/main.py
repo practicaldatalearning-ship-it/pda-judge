@@ -70,6 +70,8 @@ def main() -> int:
                     tests=tests,
                     compare_mode=spec.get("compareMode", sub.get("compareMode", "exact")),
                     time_limit_ms=int(spec.get("timeLimitMs", sub.get("timeLimitMs", 5000))),
+                    language=(sub.get("language") or "python"),
+                    setup_sql=(spec.get("setupSql") or ""),
                 )
                 out["submissionId"] = sid
                 out["total"] = len(tests)

@@ -25,10 +25,11 @@ PIDS = os.environ.get("JUDGE_PIDS", "128")
 
 
 def run_submission(code: str, tests: list[dict[str, Any]], compare_mode: str,
-                   time_limit_ms: int) -> dict[str, Any]:
+                   time_limit_ms: int, language: str = "python",
+                   setup_sql: str = "") -> dict[str, Any]:
     """Returns the harness verdict dict; never raises for a bad submission."""
     work = {"code": code, "tests": tests, "compareMode": compare_mode,
-            "timeLimitMs": time_limit_ms}
+            "timeLimitMs": time_limit_ms, "language": language, "setupSql": setup_sql}
 
     with tempfile.TemporaryDirectory() as tmp:
         work_path = os.path.join(tmp, "work.json")

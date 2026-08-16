@@ -70,3 +70,37 @@ def compare(got: Any, expected: Any, mode: str = "exact") -> bool:
     if mode == "float":
         return _eq_float(got, expected)
     return got == expected
+
+
+def compare_sql(got: Any, expected: Any, mode: str = "exact") -> bool:
+    """Compares two SQL result sets: {"columns": [...], "rows": [[...], ...]}.
+
+    NOT the same as compare() with `unordered`, and the difference matters:
+    `_sorted_deep` would sort the COLUMN list too, so `SELECT city, total` would be
+    judged equal to `SELECT total, city`. Column order is part of the answer in SQL —
+    only ROW order is negotiable, and only when the question says so.
+
+    mode: 'exact'     rows must match in order (the question specifies ORDER BY)
+          'unordered' rows compared as a multiset (no ORDER BY, any order accepted)
+          'float'     element-wise numeric tolerance, for AVG/ratio columns
+    """
+    if not isinstance(got, dict) or not isinstance(expected, dict):
+        return False
+
+    gcols = [str(c) for c in (got.get("columns") or [])]
+    ecols = [str(c) for c in (expected.get("columns") or [])]
+    if gcols != ecols:
+        return False
+
+    grows = [list(r) for r in (got.get("rows") or [])]
+    erows = [list(r) for r in (expected.get("rows") or [])]
+    if len(grows) != len(erows):
+        return False
+
+    if mode == "unordered":
+        grows = sorted(grows, key=_canon)
+        erows = sorted(erows, key=_canon)
+
+    if mode == "float":
+        return all(_eq_float(g, e) for g, e in zip(grows, erows))
+    return grows == erows

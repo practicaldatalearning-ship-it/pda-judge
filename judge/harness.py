@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import compare  # noqa: E402  (same dir inside the container)
+from compare import compare, compare_sql  # noqa: E402  (same dir inside the container)
 
 
 class Timeout(Exception):
@@ -32,9 +32,85 @@ def _alarm(_sig, _frm):
     raise Timeout()
 
 
+def run_sql(work: dict[str, Any]) -> dict[str, Any]:
+    """Judges a SQL submission against an in-memory SQLite database.
+
+    SQLite specifically, and not by accident: pda-public's Code Lab runs sql.js in the
+    browser, which IS SQLite. Judging on Postgres would mean a student's query passing in
+    the lab and failing here on a dialect difference they cannot see — the judge has to
+    speak the same SQL the student was taught in.
+
+    Each test gets a FRESH database: schema from `setup_sql`, data from the test's own
+    seed. A query with side effects (or a previous test's rows) must not colour the next
+    case.
+    """
+    import sqlite3
+
+    sql: str = work["code"]
+    setup: str = work.get("setupSql") or ""
+    tests: list[dict[str, Any]] = work["tests"]
+    mode: str = work.get("compareMode", "exact")
+    limit_ms: int = int(work.get("timeLimitMs", 5000))
+
+    out: dict[str, Any] = {"verdict": "RE", "passed": 0, "total": len(tests),
+                           "runtimeMs": 0, "failedCase": None, "error": ""}
+    started = time.perf_counter()
+    passed = 0
+
+    for i, t in enumerate(tests):
+        con = None
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.setitimer(signal.ITIMER_REAL, limit_ms / 1000)
+        try:
+            con = sqlite3.connect(":memory:")
+            if setup.strip():
+                con.executescript(setup)
+            seed = t.get("input") or []
+            if seed and isinstance(seed[0], str):
+                con.executescript(seed[0])
+
+            cur = con.execute(sql)
+            cols = [d[0] for d in (cur.description or [])]
+            rows = [list(r) for r in cur.fetchall()]
+            got = {"columns": cols, "rows": rows}
+        except Timeout:
+            out.update(verdict="TLE", passed=passed, failedCase=i,
+                       error=f"exceeded {limit_ms} ms on test {i + 1}")
+            break
+        except sqlite3.Error as e:
+            # A SQL error is the equivalent of a compile error: the query never ran.
+            out.update(verdict="CE" if i == 0 else "RE", passed=passed, failedCase=i,
+                       error=f"SQL error: {e}"[:400])
+            break
+        except BaseException as e:  # noqa: BLE001
+            out.update(verdict="RE", passed=passed, failedCase=i,
+                       error=f"{type(e).__name__}: {e}"[:400])
+            break
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if con is not None:
+                con.close()
+
+        if compare_sql(got, t["expected"], mode):
+            passed += 1
+        else:
+            out.update(verdict="WA", passed=passed, failedCase=i, error="")
+            break
+    else:
+        out["verdict"] = "AC"
+        out["passed"] = passed
+
+    out["runtimeMs"] = int((time.perf_counter() - started) * 1000)
+    return out
+
+
 def main() -> int:
     with open(sys.argv[1], "r", encoding="utf-8") as fh:
         work = json.load(fh)
+
+    if (work.get("language") or "python") == "sql":
+        print(json.dumps(run_sql(work)))
+        return 0
 
     code: str = work["code"]
     tests: list[dict[str, Any]] = work["tests"]
