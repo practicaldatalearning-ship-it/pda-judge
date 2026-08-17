@@ -26,10 +26,20 @@ PIDS = os.environ.get("JUDGE_PIDS", "128")
 
 def run_submission(code: str, tests: list[dict[str, Any]], compare_mode: str,
                    time_limit_ms: int, language: str = "python",
-                   setup_sql: str = "") -> dict[str, Any]:
-    """Returns the harness verdict dict; never raises for a bad submission."""
+                   setup_sql: str = "",
+                   datasets: dict[str, str] | None = None) -> dict[str, Any]:
+    """Returns the harness verdict dict; never raises for a bad submission.
+
+    `datasets` maps a variant id to a .db file on the HOST. The files are downloaded
+    outside the container on purpose — the sandbox runs with `--network none`, so it
+    could not fetch them itself, and that is the property worth keeping.
+    """
+    # Inside the container the databases live under /data. Rewriting the paths here means
+    # the harness never sees a host path, and the mount stays a caller decision.
+    mounts = {vid: f"/data/{os.path.basename(p)}" for vid, p in (datasets or {}).items()}
     work = {"code": code, "tests": tests, "compareMode": compare_mode,
-            "timeLimitMs": time_limit_ms, "language": language, "setupSql": setup_sql}
+            "timeLimitMs": time_limit_ms, "language": language, "setupSql": setup_sql,
+            "datasets": mounts}
 
     with tempfile.TemporaryDirectory() as tmp:
         work_path = os.path.join(tmp, "work.json")
@@ -49,6 +59,12 @@ def run_submission(code: str, tests: list[dict[str, Any]], compare_mode: str,
             "--cpus", "1",
             "--read-only", "--tmpfs", "/tmp:size=64m",
             "-v", f"{work_path}:/work/work.json:ro",
+        ]
+        # Each database read-only and mounted individually — not the cache DIRECTORY,
+        # which also holds variants belonging to OTHER questions in the same batch.
+        for host_path in (datasets or {}).values():
+            cmd += ["-v", f"{host_path}:/data/{os.path.basename(host_path)}:ro"]
+        cmd += [
             IMAGE,
             "python", "/app/harness.py", "/work/work.json",
         ]

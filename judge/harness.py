@@ -28,26 +28,68 @@ class Timeout(Exception):
     pass
 
 
+# The sandbox is Linux, where SIGALRM always exists — this is the per-test time limit and
+# it is not optional there. The guard exists so the suite can be RUN on a developer's
+# Windows machine; the container's own wall-clock ceiling in runner.py is the backstop
+# either way, so nothing in production depends on this being a no-op.
+_HAS_ALARM = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+
+
+def _arm(seconds: float) -> None:
+    if not _HAS_ALARM:
+        return
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def _disarm() -> None:
+    if _HAS_ALARM:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 def _alarm(_sig, _frm):
     raise Timeout()
 
 
+def _deny_attach(action: int, *_rest: Any) -> int:
+    """SQLite authorizer: block ATTACH/DETACH, allow everything else.
+
+    The dataset variants are mounted in one directory, so without this a submission could
+    `ATTACH 'v7.db'` and query a snapshot it was not being judged on. It is not much of a
+    leak on its own — the student never sees query output, only a verdict — but a question
+    is supposed to be answered against the database it names, and nothing legitimate needs
+    ATTACH here.
+    """
+    import sqlite3
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
 def run_sql(work: dict[str, Any]) -> dict[str, Any]:
-    """Judges a SQL submission against an in-memory SQLite database.
+    """Judges a SQL submission against SQLite.
 
     SQLite specifically, and not by accident: pda-public's Code Lab runs sql.js in the
     browser, which IS SQLite. Judging on Postgres would mean a student's query passing in
     the lab and failing here on a dialect difference they cannot see — the judge has to
     speak the same SQL the student was taught in.
 
-    Each test gets a FRESH database: schema from `setup_sql`, data from the test's own
-    seed. A query with side effects (or a previous test's rows) must not colour the next
-    case.
+    Two shapes, chosen per test:
+
+    * **dataset-backed** — `input[0]` is a variant id and `work["datasets"]` maps it to a
+      read-only .db file mounted into the container. The file is the same one the browser
+      downloaded for the public variant, so Run and Submit cannot disagree about the data.
+    * **inline** (legacy) — schema from `setupSql`, rows from the test's own seed SQL,
+      into a fresh `:memory:` database.
+
+    Either way each test gets its own connection. A query with side effects, or a previous
+    test's rows, must not colour the next case.
     """
     import sqlite3
 
     sql: str = work["code"]
     setup: str = work.get("setupSql") or ""
+    datasets: dict[str, str] = work.get("datasets") or {}
     tests: list[dict[str, Any]] = work["tests"]
     mode: str = work.get("compareMode", "exact")
     limit_ms: int = int(work.get("timeLimitMs", 5000))
@@ -59,15 +101,29 @@ def run_sql(work: dict[str, Any]) -> dict[str, Any]:
 
     for i, t in enumerate(tests):
         con = None
-        signal.signal(signal.SIGALRM, _alarm)
-        signal.setitimer(signal.ITIMER_REAL, limit_ms / 1000)
+        _arm(limit_ms / 1000)
         try:
-            con = sqlite3.connect(":memory:")
-            if setup.strip():
-                con.executescript(setup)
             seed = t.get("input") or []
-            if seed and isinstance(seed[0], str):
-                con.executescript(seed[0])
+            variant = seed[0] if seed and isinstance(seed[0], str) else None
+
+            if datasets:
+                path = datasets.get(variant or "")
+                if not path:
+                    # Not the student's fault, so it must not read as their error.
+                    out.update(verdict="RE", passed=passed, failedCase=i,
+                               error=f"dataset variant '{variant}' was not provided to the sandbox")
+                    break
+                # immutable=1: the file is mounted read-only, so SQLite must not try to
+                # create a journal or -shm beside it. It also skips locking entirely,
+                # which matters when the same file backs every test in the batch.
+                con = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+                con.set_authorizer(_deny_attach)
+            else:
+                con = sqlite3.connect(":memory:")
+                if setup.strip():
+                    con.executescript(setup)
+                if variant:
+                    con.executescript(variant)
 
             cur = con.execute(sql)
             cols = [d[0] for d in (cur.description or [])]
@@ -87,7 +143,7 @@ def run_sql(work: dict[str, Any]) -> dict[str, Any]:
                        error=f"{type(e).__name__}: {e}"[:400])
             break
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            _disarm()
             if con is not None:
                 con.close()
 
@@ -132,8 +188,7 @@ def main() -> int:
 
     # Module-level code runs under the time limit too — `while True` at import
     # would otherwise hang before a single test ran.
-    signal.signal(signal.SIGALRM, _alarm)
-    signal.setitimer(signal.ITIMER_REAL, limit_ms / 1000)
+    _arm(limit_ms / 1000)
     try:
         exec(compiled, ns)  # noqa: S102 — that is the entire job
     except Timeout:
@@ -147,7 +202,7 @@ def main() -> int:
         print(json.dumps(out))
         return 0
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        _disarm()
 
     solve = ns.get("solve")
     if not callable(solve):
@@ -163,7 +218,7 @@ def main() -> int:
         # Deep-copy per test: a solution that mutates its argument must not corrupt
         # the next case. This is a real failure mode, not a theoretical one.
         args = copy.deepcopy(t["input"])
-        signal.setitimer(signal.ITIMER_REAL, limit_ms / 1000)
+        _arm(limit_ms / 1000)
         try:
             got = solve(*args)
         except Timeout:
@@ -175,7 +230,7 @@ def main() -> int:
                        error=f"{type(e).__name__}: {e}"[:400])
             break
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            _disarm()
 
         if compare(got, t["expected"], mode):
             passed += 1

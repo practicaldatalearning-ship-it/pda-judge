@@ -19,6 +19,7 @@ import os
 import sys
 import time
 
+from judge import datasets as ds
 from judge.runner import run_submission
 from judge.supa import rpc
 
@@ -37,6 +38,10 @@ def main() -> int:
 
     print(f"claimed {len(batch)} submission(s)")
     tests_cache: dict[str, dict] = {}
+    # Variant files, keyed by question. Downloading 15 databases per SUBMISSION rather
+    # than per question would dominate the batch when several students are on the same
+    # problem, which is the normal case.
+    dataset_cache: dict[str, dict[str, str]] = {}
     results: list[dict] = []
 
     def flush() -> None:
@@ -65,13 +70,34 @@ def main() -> int:
                 # Visible first: a failure there is the clearest possible feedback,
                 # and it matches the order the student saw when they hit Run.
                 tests = list(spec.get("visibleTests") or []) + list(spec["hiddenTests"])
+
+                # A dataset-backed SQL question names a shared database instead of
+                # carrying its own schema. Assemble its variants before judging — a
+                # missing one is reported, never silently skipped, because judging
+                # against a partial set produces a confident WRONG verdict.
+                variant_files: dict[str, str] = {}
+                dataset_id = spec.get("datasetId")
+                if dataset_id:
+                    if qid not in dataset_cache:
+                        meta = rpc("mobile_svc_practice_dataset", {"p_id": dataset_id}) or {}
+                        if meta.get("error"):
+                            raise RuntimeError(f"dataset '{dataset_id}' is not registered")
+                        wanted = ds.variants_needed(tests)
+                        dataset_cache[qid] = ds.fetch(meta, wanted)
+                        print(f"  dataset {dataset_id}: {len(dataset_cache[qid])} variant(s) ready")
+                    variant_files = dataset_cache[qid]
+
                 out = run_submission(
                     code=sub["code"],
                     tests=tests,
                     compare_mode=spec.get("compareMode", sub.get("compareMode", "exact")),
                     time_limit_ms=int(spec.get("timeLimitMs", sub.get("timeLimitMs", 5000))),
-                    language=(sub.get("language") or "python"),
+                    # The SPEC decides the language, not the submission. `sub.language`
+                    # is whatever the client sent at submit time, and nothing a client
+                    # sends may steer how a verdict is produced.
+                    language=(spec.get("language") or sub.get("language") or "python"),
                     setup_sql=(spec.get("setupSql") or ""),
+                    datasets=variant_files,
                 )
                 out["submissionId"] = sid
                 out["total"] = len(tests)

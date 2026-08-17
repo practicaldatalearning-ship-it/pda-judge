@@ -52,9 +52,16 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_DATASETS_ACCESS_KEY_ID: ${{ secrets.R2_DATASETS_ACCESS_KEY_ID }}
+          R2_DATASETS_SECRET_ACCESS_KEY: ${{ secrets.R2_DATASETS_SECRET_ACCESS_KEY }}
         run: |
           missing=0
-          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY; do
+          # R2 is checked here too. Without it, dataset-backed SQL questions fail one at a
+          # time with a per-submission error, which is a slow and confusing way to learn
+          # that a secret is absent.
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY \
+                      R2_ACCOUNT_ID R2_DATASETS_ACCESS_KEY_ID R2_DATASETS_SECRET_ACCESS_KEY; do
             val="${!name}"
             if [ -z "$val" ]; then
               echo "::error::Required secret '$name' is NOT set."
@@ -95,6 +102,13 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Read-only, scoped to the datasets bucket. The judge never writes to R2 — the
+          # hidden variants are the answer key, and nothing here should be able to change
+          # what students are judged against.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_DATASETS: ${{ secrets.R2_BUCKET_DATASETS }}
+          R2_DATASETS_ACCESS_KEY_ID: ${{ secrets.R2_DATASETS_ACCESS_KEY_ID }}
+          R2_DATASETS_SECRET_ACCESS_KEY: ${{ secrets.R2_DATASETS_SECRET_ACCESS_KEY }}
           JUDGE_BATCH: ${{ github.event.inputs.batch || github.event.client_payload.batch || '20' }}
           JUDGE_IMAGE: pda-judge-sandbox
         run: python -m judge.main

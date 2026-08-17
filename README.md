@@ -49,10 +49,12 @@ minutes are automatically returned to `queued`.
 judge/compare.py   comparison semantics — exact | unordered | float
 judge/harness.py   runs INSIDE the container; the only thing that touches student code
 judge/runner.py    builds the container; where every restriction is actually set
-judge/supa.py      service-role RPC client — the only place the secret is used
+judge/supa.py      service-role RPC client — the only place the Supabase key is used
+judge/r2.py        signed GET against R2 — read-only, one bucket, stdlib SigV4
+judge/datasets.py  resolves + caches the dataset variants a SQL question is judged on
 judge/main.py      one batch: claim → judge → post
 sandbox/Dockerfile bare python:3.11-slim, non-root, no shell
-tests/             the comparison rules (see the warning below)
+tests/             the comparison rules (see the warning below) + dataset judging
 ```
 
 ### `tests/test_compare.py` is the most important file here
@@ -68,6 +70,14 @@ CI runs these before any judging happens, and a failure stops the batch.
 2. Settings → Secrets and variables → Actions → **repository** secrets:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
+   - `R2_ACCOUNT_ID`
+   - `R2_BUCKET_DATASETS`
+   - `R2_DATASETS_ACCESS_KEY_ID` — **Object Read only**, scoped to that one bucket
+   - `R2_DATASETS_SECRET_ACCESS_KEY`
+
+   The R2 credentials read the hidden dataset variants, which are the answer key for SQL
+   questions. Read-only and single-bucket on purpose: a compromise of this public repo
+   must not be able to change what students are judged against.
 3. Push. The first scheduled run will build the sandbox and drain an empty queue.
 4. Wire the fast path — from the submit RPC via `pg_net`, or from a Worker:
    ```
@@ -98,9 +108,9 @@ Runner-side env: `JUDGE_BATCH`, `JUDGE_BUDGET_SECONDS` (default 420), `JUDGE_MEM
 
 ## Known limitations
 
-- **Python only.** SQL questions (`language='sql'`) are claimed but will fail with
-  "no callable named `solve`". Add a SQL branch to the harness before publishing a SQL
-  sheet.
+- **`vBIG` is not judged.** The largest dataset variant (~647k rows, intended for a
+  performance verdict) is not built yet, so a correct-but-slow query is not
+  distinguished from a correct one.
 - **Tests come from Postgres, not R2.** Fine at current volume; at roughly 5,000
   submissions/day the payload would approach Supabase's free egress tier. The fix is to
   write `hidden_tests` to R2 at import time and fetch from there — R2 egress is free —
