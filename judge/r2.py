@@ -28,6 +28,12 @@ SECRET = os.environ.get("R2_DATASETS_SECRET_ACCESS_KEY", "")
 
 _EMPTY_SHA = hashlib.sha256(b"").hexdigest()
 
+# urllib's default User-Agent is "Python-urllib/3.x", and Cloudflare's managed bot rules
+# 403 it. That is not a misconfiguration to switch off — the public variant sits on the
+# same CDN as the marketing site — so the judge identifies itself instead. Verified: the
+# same URL returns 200 with this header and 403 without it.
+_UA = "pda-judge/1.0 (+https://github.com/practicaldatalearning-ship-it/pda-judge)"
+
 
 def configured() -> bool:
     return bool(ACCOUNT and KEY_ID and SECRET)
@@ -72,6 +78,7 @@ def get_object(key: str, timeout: int = 60) -> bytes:
         f"https://{host}{uri}",
         headers={
             "Host": host,
+            "User-Agent": _UA,
             "x-amz-content-sha256": _EMPTY_SHA,
             "x-amz-date": amz,
             "Authorization": (
@@ -93,8 +100,9 @@ def get_object(key: str, timeout: int = 60) -> bytes:
 
 def get_public(url: str, timeout: int = 60) -> bytes:
     """Fetches the public variant from the CDN — no credentials, and cache-friendly."""
+    req = urllib.request.Request(url, headers={"User-Agent": _UA}, method="GET")
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as res:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
             return res.read()
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"GET {url} failed: HTTP {e.code}") from None
